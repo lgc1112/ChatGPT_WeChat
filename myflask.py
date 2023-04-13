@@ -8,6 +8,10 @@ import wechatpy
 import time
 import os
 import yaml
+import logging
+fmt = '[%(asctime)-15s]-[%(process)d:%(levelname)s]-[%(filename)s:%(lineno)d]-%(message)s'
+# logging.basicConfig(filename = './chatgpt_proxy.log', level = logging.INFO, format=fmt)
+logging.basicConfig(level = logging.DEBUG, format=fmt)
 # 导入自定义类
 from whiteIPManage import whiteIP
 from gptManage import gptSessionManage,gptMessageManage
@@ -38,7 +42,7 @@ app.debug = True
 # def hello():
 #     return "Hello test!"
 
-@app.route('/wechat/', methods=['GET', 'POST']) 
+@app.route('/callback', methods=['GET', 'POST']) 
 def wechat():
     global reply
     global msgsmanag
@@ -69,6 +73,7 @@ def wechat():
                 rtext = msgsmanag.get_response(msg,cctime,tt)
             else:
                 rtext = msgsmanag.get_response(msg,cctime,msg.content)
+            logging.debug('get_rtext:::' + str(rtext))
             rt = str(rtext).strip()
             reply = create_reply(rt, message=msg)#创建消息
             return reply.render()
@@ -98,4 +103,4 @@ def wechat():
 
 
 if __name__ == '__main__':
-    app.run( host = '0.0.0.0')
+    app.run(host='0.0.0.0', port=80, debug=True)
