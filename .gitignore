@@ -3,3 +3,5 @@ untitled.txt
 config/.ipynb_checkpoints/
 pic/.ipynb_checkpoints/
 *.pyc
+nohup.out
+chat.log

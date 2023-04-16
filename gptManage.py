@@ -4,8 +4,10 @@ import json
 import math
 import random
 import logging
-# import azure.cognitiveservices.speech as speechsdk
+import azure.cognitiveservices.speech as speechsdk
 from wechatpy import WeChatClient
+from wechatpy.replies import VoiceReply
+
 import threading
 import os
 from os import listdir
@@ -13,13 +15,13 @@ from os import listdir
 import yaml
 with open('config/config.yml', 'r') as f:
     configs = yaml.load(f, Loader=yaml.FullLoader)
-# from revChatGPT.V1 import Chatbot
-# chatbot = Chatbot(config={
-#   "email": config.OPENAI_EMAIL,
-#   "access_token": config.ACCESS_TOKEN
-# })
+from revChatGPT.V1 import Chatbot
+chatbot = Chatbot(config={
+  "email":  configs['openai']['account'],
+  "access_token":  configs['openai']['api_keys']
+})
 fmt = '[%(asctime)-15s]-[%(process)d:%(levelname)s]-[%(filename)s:%(lineno)d]-%(message)s'
-# logging.basicConfig(filename = './chatgpt_proxy.log', level = logging.INFO, format=fmt)
+# logging.basicConfig(filename = './chat.log', level = logging.DEBUG, format=fmt)
 logging.basicConfig(level=logging.DEBUG, format=fmt)
 
 
@@ -40,9 +42,9 @@ class gptSessionManage(object):
         '''
         会话管理, 拼接回复模板
         '''
-        # 清理超过10分钟的会话
-        if time.time() - self.last_q_time > 600:
-            self.end_message()
+        # # 清理超过10分钟的会话
+        # if time.time() - self.last_q_time > 600:
+        #     self.end_message()
         # 判断会话长度是否超过限制
         if len(self.messages) > self.sizeLim:
             self.messages.pop(1)
@@ -57,11 +59,14 @@ class gptSessionManage(object):
         '''
         self.messages.append({"role": "assistant", "content": f"{msg}"})
 
-    def end_message(self):
+    def end_message(self, to_voice = False):
         '''
         初始化会话
         '''
-        self.messages = [{"role": "system", "content": configs['openai']['system_prompt']}, ]
+        if to_voice:
+            self.messages = [{"role": "system", "content": configs['openai']['english_system_prompt']}]
+        else:
+            self.messages = [{"role": "system", "content": configs['openai']['system_prompt']}]
 
     def get_message(self):
         self.messages
@@ -84,7 +89,35 @@ class userMgr(object):
         self.req_times = 0
         self.messages = []
         self.msg_mgr = msg_mgr
+        self.conversation_id = ''
+        self.parent_id = ''
+        self.is_voice = False
+        self.err_num = 0
+        
+    def clear(self):
+        self.waiting_rsp_msg_id = 0
+        self.timeout_waiting_rsp_msg_id = 0
+        self.session_mgr.end_message()
+        self.recv_rsp_msg = ''
+        self.latest_req_time = 0
+        self.req_times = 0
+        self.messages = []
+        self.conversation_id = ''
+        self.parent_id = ''
+        self.err_num = 0
 
+    def transfer_voice(self):
+        self.waiting_rsp_msg_id = 0
+        self.timeout_waiting_rsp_msg_id = 0
+        self.session_mgr.end_message(True)
+        self.recv_rsp_msg = ''
+        self.latest_req_time = 0
+        self.req_times = 0
+        self.messages = []
+        self.conversation_id = ''
+        self.parent_id = ''
+        self.err_num = 0
+    
     def set_waiting_rsp_msg_id(self, msg_id):
         self.waiting_rsp_msg_id = msg_id
 
@@ -135,31 +168,107 @@ class userMgr(object):
                 'temperature': self.msg_mgr.temperature,
             }
 
+
+            # answer = ''
+            # new_conversation_id = ''
+            # new_parent_id = ''
+            # logging.info(f'old_conversation_id={self.conversation_id}, new_parent_id={self.parent_id}')
+            # prompt = configs['openai']['system_prompt']
+            # logging.info(f'query={msgs.content} query={prompt}')
+            # if (self.conversation_id == ''):
+            #     for data in chatbot.ask(prompt, self.conversation_id, self.parent_id):
+            #         self.conversation_id = data['conversation_id']
+            #         self.parent_id = data['parent_id']
+                 
+            # for data in chatbot.ask(f"{msgs.content}", self.conversation_id, self.parent_id):
+            #     answer = data['message']
+            #     self.conversation_id = data['conversation_id']
+            #     self.parent_id = data['parent_id']
+            #     model = data['model']
+            # logging.info(f'query={msgs.content}, model = {model}, answer={answer}, new_conversation_id={self.conversation_id}, new_parent_id={self.parent_id}')
+            # return answer
             response = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=json_data,
-                                     timeout=200)
+                                     timeout=120)
             response_parse = json.loads(response.text)
             logging.debug('收到的消息：' + str(response_parse))
             atime = int(time.time())
             logging.debug('收到的时间差：%d s,%d,%d' % (atime - btime, btime, atime))
             if 'error' in response_parse:
-                print(response_parse)
-                return '出错了，请稍后再试！'
+                logging.debug('咨询人数过多，请稍后再试！')
+                return '咨询人数过多，请稍后再试！'
             else:
                 self.session_mgr.add_res_message(
                     response_parse['choices'][0]['message']['content'])
                 
                 return response_parse['choices'][0]['message']['content']
         except Exception as e:
-            print(e)
+            logging.debug(e)
+            logging.debug('请求超时，请稍后再试！')
             # return '请求超时，请稍后再试！\n【近期官方接口响应变慢，若持续出现请求超时，还请换个时间再来😅~】'
+            return '请求超时，请稍后再试！'
+
+        
+    def send_request_voice(self, msgs):
+        '''voice消息处理'''
+        try:
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': self.msg_mgr.get_header(),
+            }
+            logging.debug('发送的消息：' + str(self.session_mgr.messages))
+
+            json_data = {
+                'model': self.msg_mgr.model,
+                'messages': self.session_mgr.messages,
+                'max_tokens': self.msg_mgr.configs['azure']['max_token'],
+                'temperature': self.msg_mgr.temperature,
+            }
+
+            btime = int(time.time())
+            response = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=json_data,
+                                     timeout=120)
+            response_parse = json.loads(response.text)
+            logging.debug('收到的消息：' + str(response_parse))
+            atime = int(time.time())
+            logging.debug('收到的时间差：%d s,%d,%d' % (atime - btime, btime, atime))
+            
+            if 'error' in response_parse:
+                logging.debug('咨询人数过多，请稍后再试！')
+                return '咨询人数过多，请稍后再试！'
+            else:
+                rtext = response_parse['choices'][0]['message']['content']
+                logging.debug('开始转语音:' + str(rtext))
+                if self.msg_mgr.get_voice_from_azure(rtext, str(msgs.source), str(msgs.id)):
+                    logging.debug('转语音成功:' + str(rtext))
+                    media_id = self.msg_mgr.upload_wechat_voice(str(msgs.source), str(msgs.id))
+                    logging.debug('media_id:' + str(media_id))
+                    if media_id:
+                        reply = VoiceReply(message=msgs)
+                        reply.media_id = str(media_id)
+                        time.sleep(1.2)
+                        self.session_mgr.add_res_message(rtext)
+                        return [reply]
+                    else:
+                        return rtext
+                else:
+                    logging.debug('转语音失败:' + str(rtext))
+                    self.session_mgr.add_res_message(rtext)
+                    return rtext
+        except Exception as e:
+            logging.debug(e)
+            logging.debug('请求超时，请稍后再试！')
             return '请求超时，请稍后再试！'
 
     def runable_task(self):
         msg_id = self.waiting_rsp_msg_id
         logging.debug('start thread... id:' + str(msg_id))
         time.sleep(14)
-        self.timeout_waiting_rsp_msg_id = msg_id
-        logging.debug('thread timeout... id:' + str(msg_id))
+        if (msg_id == self.waiting_rsp_msg_id):
+            self.timeout_waiting_rsp_msg_id = msg_id
+            logging.debug('thread timeout... id:' + str(msg_id))
+        else:
+            logging.debug('对话已不需要记录')
+            
 
     def get_responce_first(self, msg):
         '''
@@ -167,15 +276,20 @@ class userMgr(object):
         '''
 
         self.waiting_rsp_msg_id = msg.id
-        logging.debug('get_responce_first:' + str(msg.id))
+        logging.debug('get_responce_first:' + str(msg.id) + str(msg))
         t = threading.Thread(target=self.runable_task)
         t.start()
-        self.session_mgr.add_send_message(msg)
-        if msg.type == 'text' or self.configs['azure']['trans_to_voice'] == False:
+        if msg.type == 'text' or self.msg_mgr.configs['azure']['trans_to_voice'] == False:
+            self.session_mgr.add_send_message(msg.content)
             res = self.send_request(msg)
+        else:
+            self.session_mgr.add_send_message(msg.recognition)
+            res = self.send_request_voice(msg)
+            
+        if self.waiting_rsp_msg_id == msg.id:
             self.set_recv_rsp_msg(res)
         else:
-            pass  # self.recv_rsp_msg = self.send_request_voice(msg)
+            logging.debug('对话已经发生重入')
         return 'success'
 
     def get_responce_not_first(self, msg):
@@ -222,12 +336,24 @@ class gptMessageManage(object):
         '''
         获取每条msg，回复消息
         '''
-        logging.debug('get_response:' + str(msgs.id))
+        logging.debug('get_request:' + str(msgs.id) + str(msg_content))
         # self.msgs_time_dict[str(msgs.id)] = curtime
         user_mgr = self.user_mgrs.get(str(msgs.source), None)
         if user_mgr is None:
             user_mgr = userMgr(self, gptSessionManage(self.configs['openai']['save_history']))
             self.user_mgrs[str(msgs.source)] =user_mgr
+
+        if user_mgr.is_voice and self.have_chinese(msg_content):
+            logging.debug('Transfer Chinese:' + str(msgs.id) + str(msg_content))
+            user_mgr.is_voice = False
+            user_mgr.clear()
+            
+        # 切换英语口语模式
+        if msgs.type == 'voice' and not user_mgr.is_voice and not self.have_chinese(msg_content):
+            logging.debug('Transfer English:' + str(msgs.id) + str(msg_content))
+            user_mgr.is_voice = True
+            user_mgr.transfer_voice()
+            
 
         oldTime = user_mgr.get_latest_req_time()
         user_mgr.set_latest_req_time(curtime)
@@ -250,6 +376,10 @@ class gptMessageManage(object):
                     t = threading.Thread(target=user_mgr.runable_task)
                     t.start()
                 res = 'success'
+        elif msg_content == '$new':
+            user_mgr.clear()
+            logging.debug("$new1")
+            return '对话历史已经清空'
         else:
             waiting_rsp_user_id = user_mgr.get_waiting_rsp_msg_id()
             # 收到新消息
@@ -257,9 +387,17 @@ class gptMessageManage(object):
                 res = user_mgr.get_responce_first(msgs)
             else:
                 if waiting_rsp_user_id != msgs.id:
-                    logging.debug("请等待上一句回复完成后再发新的对话")
+                    user_mgr.err_num += 1
+                    if user_mgr.err_num == 3:
+                        logging.debug("请等待上一句咨询回复完成后再发新的对话, num:{}".format(user_mgr.err_num))
+                    else:
+                        logging.debug("$clear")
+                        user_mgr.clear()
+                        return '对话历史已经清空'
+
                     user_mgr.set_latest_req_time(oldTime)
-                    return '请等待上一句话回复完成后再发下一句话'
+                    user_mgr.err_num += 1
+                    return '请等待上一句话咨询回复完成后再开始下一句咨询'
 
         logging.debug('1111记录时间：{}, 当前时间:{}, waiting_rsp_msg_id:{}, timeout_id:{}, recv_msg:{}'.format(
             user_mgr.get_latest_req_time(), curtime, user_mgr.get_waiting_rsp_msg_id(),
@@ -278,47 +416,6 @@ class gptMessageManage(object):
         # user_mgr.set_recv_rsp_msg('')
         # logging.debug('收到结果', str(recvmsg))
         # lock.release()
-        # # 获取消息属性
-        # users_obj = self.msgs_msgdata_dict.get(str(msgs.source),'')
-        # # 判断是否新用户
-        # if users_obj=='':
-        #     self.msgs_msgdata_dict[str(msgs.source)] = gptSessionManage(self.configs['openai']['save_history'])
-        # # 判断消息状态
-        # msg_status = self.msgs_status_dict.get(str(msgs.id),'')
-        # # 为新消息
-        # if msg_status=='':
-        #     # 按照消息的ID创建消息列表
-        #     self.msgs_list[str(msgs.id)]=[]
-        #     self.msgs_list[str(msgs.id)].append(msgs)
-        #     # 将当前时间设定为消息的最新时间
-        #
-        #     # 修改消息的状态为pending
-        #     self.msgs_status_dict[str(msgs.id)] = 'pending'
-        #     # 加入消息到消息管理器中
-        #     users_obj.add_send_message(msg_content)
-        #
-        #     # 获取用户消息的时间间隔，防止用户发送消息过于频繁：
-        #     user_sendTimeSpan = self.user_msg_timeSpan_dict.get(str(msgs.source), [])
-        #     user_sendTimePoint = self.user_msg_timePoint_dict.get(str(msgs.source), curtime - 15)
-        #     if len(user_sendTimeSpan) < 3:
-        #         self.user_msg_timePoint_dict[str(msgs.source)] = curtime
-        #         user_sendTimeSpan.append(curtime - user_sendTimePoint)
-        #         self.user_msg_timeSpan_dict[str(msgs.source)] = user_sendTimeSpan
-        #     else:
-        #         user_curTimeUse = curtime - user_sendTimePoint
-        #         user_avger_time = (user_sendTimeSpan[-2] + user_sendTimeSpan[-1] + user_curTimeUse) / 3
-        #         if user_avger_time < 5:
-        #             return '发送消息频率过快，请等候10s以上重试！(PS:资源有限，针对消息发送频率进行了限制，还请谅解~)'
-        #         else:
-        #             self.user_msg_timePoint_dict[str(msgs.source)] = curtime
-        #             self.user_msg_timeSpan_dict[str(msgs.source)] = [user_sendTimeSpan[-2], user_sendTimeSpan[-1],
-        #                                                              user_curTimeUse]
-        #
-        #     # 等候消息返回
-        #     res = self.rec_get_returns_first(msgs)
-        # # 为二次请求消息
-        # else:
-        #     res = self.rec_get_returns_pending(msgs)
 
         logging.debug('2222记录时间：{}, 当前时间:{}, waiting_rsp_msg_id:{}, timeout_id:{}, recv_msg:{}'.format(
             user_mgr.get_latest_req_time(), curtime, user_mgr.get_waiting_rsp_msg_id(),
@@ -329,7 +426,7 @@ class gptMessageManage(object):
             if (user_mgr.get_timeout_waiting_rsp_msg_id() == user_mgr.get_waiting_rsp_msg_id()
                     and user_mgr.get_recv_rsp_msg() == ''):
                 logging.debug('回复-------读取消息超时，请回复【1】继续读取消息')
-                return '读取消息超时，请回复【1】继续读取消息'
+                return '人数过多，咨询超时，请回复【1】继续上一条咨询'
             recvmsg = user_mgr.get_recv_rsp_msg()
             user_mgr.set_recv_rsp_msg('')
             user_mgr.set_waiting_rsp_msg_id(0)
@@ -340,7 +437,7 @@ class gptMessageManage(object):
             t.start()
             # 是否返回的语音消息的media_id
             if isinstance(retunsMsg, list):
-                print('返回语音的列表：', retunsMsg)
+                logging.debug('返回语音的列表：' + str(recvmsg))
                 return retunsMsg
             # 判断长度是否过长，否则将消息分割
             if len(retunsMsg) > self.rsize:
@@ -355,9 +452,9 @@ class gptMessageManage(object):
                 return self.msgs_msg_cut_dict[str(msgs.source)].pop(0) + '\n 还有剩余结果，请回复【1】查看！'
             return retunsMsg
         else:
-            logging.debug('当前的对话不需要回复:time:{}, 内容：{}'.format(curtime, msg_content))
+            logging.debug('该旧请求不需要回复:time:{}, 内容：{}'.format(curtime, msg_content))
             # self.del_cache()
-            time.sleep(15)
+            time.sleep(4)
             return ''
 
     def rec_get_returns_pending(self, msgs, user_mgr):
@@ -445,15 +542,15 @@ class gptMessageManage(object):
             response = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=json_data,
                                      timeout=9)
             response_parse = json.loads(response.text)
-            print(response_parse)
+            logging.debug(response_parse)
             if 'error' in response_parse:
-                print(response_parse)
+                logging.debug(response_parse)
                 return '出错了，请稍后再试！'
             else:
                 rtext = response_parse['choices'][0]['message']['content']
                 if self.get_voice_from_azure(rtext, str(msgs.source), str(msgs.id)):
                     media_id = self.upload_wechat_voice(str(msgs.source), str(msgs.id))
-                    # print('media_id:',str(media_id))
+                    logging.debug('media_id:' + str(media_id))
                     if media_id:
                         self.msgs_msgdata_dict[str(msgs.source)].add_res_message(rtext)
                         return [str(media_id)]
@@ -463,32 +560,43 @@ class gptMessageManage(object):
                     self.msgs_msgdata_dict[str(msgs.source)].add_res_message(rtext)
                     return rtext
         except Exception as e:
-            print(e)
+            logging.debug(e)
             return '请求超时，请稍后再试！'
 
     def get_voice_from_azure(self, texts, msgsource, msgid):
         '''
         从AZURE获取文本转语音的结果
         '''
-        # try:
-        #     speech_config = speechsdk.SpeechConfig(subscription=self.configs['azure']['subscription'], region=self.configs['azure']['region'])
-        #     speech_config.set_speech_synthesis_output_format(speechsdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3)
-        #     if self.have_chinese(texts):
-        #         # speech_config.speech_synthesis_voice_name ="zh-CN-YunxiNeural"
-        #         speech_config.speech_synthesis_voice_name =self.configs['azure']['zh_model']
-        #     else:
-        #         # speech_config.speech_synthesis_voice_name ="en-US-GuyNeural"
-        #         speech_config.speech_synthesis_voice_name =self.configs['azure']['en_model']
-        #     audio_config = speechsdk.audio.AudioOutputConfig(filename=f"voice/{msgsource[-5:]+msgid[-5:]}.mp3")
-        #     speech_synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
-        #     rr = speech_synthesizer.speak_text(f"{texts}")
-        #     if rr.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-        #         return True
-        #     else:
-        #         return False
-        # except Exception as e:
-        #     print(e)
-        #     return False
+        logging.debug('从AZURE获取文本转语音的结果')
+        try:
+            speech_config = speechsdk.SpeechConfig(subscription=self.configs['azure']['acess_token'], region=self.configs['azure']['region'])
+            # speech_config = speechsdk.SpeechConfig(auth_token=self.configs['azure']['auth_token'])
+            speech_config.set_speech_synthesis_output_format(speechsdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3)
+            if self.have_chinese(texts):
+                # speech_config.speech_synthesis_voice_name ="zh-CN-YunxiNeural"
+                speech_config.speech_synthesis_voice_name =self.configs['azure']['zh_model']
+            else:
+                # speech_config.speech_synthesis_voice_name ="en-US-GuyNeural"
+                speech_config.speech_synthesis_voice_name =self.configs['azure']['en_model']
+            audio_config = speechsdk.audio.AudioOutputConfig(filename=f"voice/{msgsource[-5:]+msgid[-5:]}.mp3")
+            speech_synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
+            speech_synthesis_result = speech_synthesizer.speak_text_async(f"{texts}").get()
+            # rr = speech_synthesizer.speak_text(f"{texts}")
+            logging.debug('dddddd:'+ str(f"{texts}") + 'reason:' + str(speech_synthesis_result.__str__()))
+            if speech_synthesis_result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+                return True
+            else:
+                cancellation_details = speech_synthesis_result.cancellation_details
+                print("Speech synthesis canceled: {}".format(cancellation_details.reason))
+                if cancellation_details.reason == speechsdk.CancellationReason.Error:
+                    if cancellation_details.error_details:
+                        print("Error details: {}".format(cancellation_details.error_details))
+                        print("Did you set the speech resource key and region values?")
+                return False
+        except Exception as e:
+            
+            logging.debug('从AZURE获取文本转语音的结果错误:{}'.format(str(e)))
+            return False
 
     def upload_wechat_voice(self, msgsource, msgid):
         '''上传语音素材到微信'''
