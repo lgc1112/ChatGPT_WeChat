@@ -21,8 +21,8 @@ chatbot = Chatbot(config={
   "access_token":  configs['openai']['api_keys']
 })
 fmt = '[%(asctime)-15s]-[%(process)d:%(levelname)s]-[%(filename)s:%(lineno)d]-%(message)s'
-# logging.basicConfig(filename = './chat.log', level = logging.DEBUG, format=fmt)
-logging.basicConfig(level=logging.DEBUG, format=fmt)
+logging.basicConfig(filename = './chat.log', level = logging.DEBUG, format=fmt)
+# logging.basicConfig(level=logging.DEBUG, format=fmt)
 
 
 class gptSessionManage(object):
@@ -91,7 +91,7 @@ class userMgr(object):
         self.msg_mgr = msg_mgr
         self.conversation_id = ''
         self.parent_id = ''
-        self.is_voice = False
+        self.is_english_teacher_mode = False
         self.err_num = 0
         
     def clear(self):
@@ -267,7 +267,7 @@ class userMgr(object):
             self.timeout_waiting_rsp_msg_id = msg_id
             logging.debug('thread timeout... id:' + str(msg_id))
         else:
-            logging.debug('对话已不需要记录')
+            logging.debug('waiting_rsp_msg_id发生修改，对话已不需要记录，msg_id：{}，waiting_rsp_msg_id：{}'.format(self.timeout_waiting_rsp_msg_id, msg_id))
             
 
     def get_responce_first(self, msg):
@@ -289,7 +289,7 @@ class userMgr(object):
         if self.waiting_rsp_msg_id == msg.id:
             self.set_recv_rsp_msg(res)
         else:
-            logging.debug('对话已经发生重入')
+            logging.debug('对话已经发生重入, waiting_rsp_msg_id:{}, msg.id:{}', self.waiting_rsp_msg_id, msg.id)
         return 'success'
 
     def get_responce_not_first(self, msg):
@@ -343,15 +343,15 @@ class gptMessageManage(object):
             user_mgr = userMgr(self, gptSessionManage(self.configs['openai']['save_history']))
             self.user_mgrs[str(msgs.source)] =user_mgr
 
-        if user_mgr.is_voice and self.have_chinese(msg_content):
+        if msgs.type == 'text' and user_mgr.is_english_teacher_mode and self.have_chinese(msg_content):
             logging.debug('Transfer Chinese:' + str(msgs.id) + str(msg_content))
-            user_mgr.is_voice = False
+            user_mgr.is_english_teacher_mode = False
             user_mgr.clear()
             
         # 切换英语口语模式
-        if msgs.type == 'voice' and not user_mgr.is_voice and not self.have_chinese(msg_content):
+        if msgs.type == 'voice' and not user_mgr.is_english_teacher_mode and not self.have_chinese(msg_content):
             logging.debug('Transfer English:' + str(msgs.id) + str(msg_content))
-            user_mgr.is_voice = True
+            user_mgr.is_english_teacher_mode = True
             user_mgr.transfer_voice()
             
 
@@ -425,12 +425,12 @@ class gptMessageManage(object):
         if curtime == user_mgr.get_latest_req_time():
             if (user_mgr.get_timeout_waiting_rsp_msg_id() == user_mgr.get_waiting_rsp_msg_id()
                     and user_mgr.get_recv_rsp_msg() == ''):
-                logging.debug('回复-------读取消息超时，请回复【1】继续读取消息')
+                logging.debug('人数过多，咨询超时，请回复【1】继续上一条咨询')
                 return '人数过多，咨询超时，请回复【1】继续上一条咨询'
             recvmsg = user_mgr.get_recv_rsp_msg()
             user_mgr.set_recv_rsp_msg('')
             user_mgr.set_waiting_rsp_msg_id(0)
-            logging.debug('回复回复-------' + str(recvmsg))
+            logging.debug('回复-------' + str(recvmsg))
             retunsMsg = recvmsg
             # 清理缓存
             t = threading.Thread(target=self.del_cache)

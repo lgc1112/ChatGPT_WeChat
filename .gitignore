@@ -5,3 +5,5 @@ pic/.ipynb_checkpoints/
 *.pyc
 nohup.out
 chat.log
+voice*
+config/config.yml
