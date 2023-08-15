@@ -17,9 +17,13 @@ with open('config/config.yml', 'r') as f:
     configs = yaml.load(f, Loader=yaml.FullLoader)
 from revChatGPT.V1 import Chatbot
 chatbot = Chatbot(config={
-  "email":  configs['openai']['account'],
-  "access_token":  configs['openai']['api_keys']
+  "access_token":  configs['openai']['api_keys'],
 })
+
+# chatbot = Chatbot(config={
+#   "email":  configs['openai']['account'],
+#   "access_token":  configs['openai']['api_keys']
+# })
 fmt = '[%(asctime)-15s]-[%(process)d:%(levelname)s]-[%(filename)s:%(lineno)d]-%(message)s'
 logging.basicConfig(filename = './chat.log', level = logging.DEBUG, format=fmt)
 # logging.basicConfig(level=logging.DEBUG, format=fmt)
@@ -34,7 +38,7 @@ class gptSessionManage(object):
         '''
         初始化
         '''
-        self.messages = [{"role": "system", "content": configs['openai']['system_prompt']}, ]
+        self.messages = [{"role": "system", "content": configs['openai']['system_prompt']}, {'role': 'user', 'content': '你是谁'}, {'role': 'assistant', 'content': '您好，我是情感咨询师张怡。我可以免费帮助您解决各种情感问题，如果您需要咨询，随时可以用语音或文字向我提出问题。'},]
         self.sizeLim = save_history
         self.last_q_time = time.time()
 
@@ -66,7 +70,7 @@ class gptSessionManage(object):
         if to_voice:
             self.messages = [{"role": "system", "content": configs['openai']['english_system_prompt']}]
         else:
-            self.messages = [{"role": "system", "content": configs['openai']['system_prompt']}]
+            self.messages = [{"role": "system", "content": configs['openai']['system_prompt']}, {'role': 'user', 'content': '你是谁'}, {'role': 'assistant', 'content': '您好，我是情感咨询师张怡。我可以免费帮助您解决各种情感问题，如果您需要咨询，随时可以用语音或文字向我提出问题。'},]
 
     def get_message(self):
         self.messages
@@ -194,8 +198,8 @@ class userMgr(object):
             atime = int(time.time())
             logging.debug('收到的时间差：%d s,%d,%d' % (atime - btime, btime, atime))
             if 'error' in response_parse:
-                logging.debug('咨询人数过多，请稍后再试！')
-                return '咨询人数过多，请稍后再试！'
+                logging.debug('咨询人数过多，访问受限，请稍后再试！')
+                return '咨询人数过多，访问受限，请稍后再试！'
             else:
                 self.session_mgr.add_res_message(
                     response_parse['choices'][0]['message']['content'])
@@ -274,7 +278,6 @@ class userMgr(object):
         '''
         首次消息开始处理
         '''
-
         self.waiting_rsp_msg_id = msg.id
         logging.debug('get_responce_first:' + str(msg.id) + str(msg))
         t = threading.Thread(target=self.runable_task)
@@ -289,7 +292,7 @@ class userMgr(object):
         if self.waiting_rsp_msg_id == msg.id:
             self.set_recv_rsp_msg(res)
         else:
-            logging.debug('对话已经发生重入, waiting_rsp_msg_id:{}, msg.id:{}', self.waiting_rsp_msg_id, msg.id)
+            logging.debug('对话已经发生重入, waiting_rsp_msg_id:{}, msg.id:{}'.format(self.waiting_rsp_msg_id, msg.id))
         return 'success'
 
     def get_responce_not_first(self, msg):
@@ -332,12 +335,12 @@ class gptMessageManage(object):
 
         self.last_clean_time = time.time()
 
-    def get_response(self, msgs, curtime, msg_content):
+    def get_response(self, msgs, recvtime, msg_content):
         '''
         获取每条msg，回复消息
         '''
         logging.debug('get_request:' + str(msgs.id) + str(msg_content))
-        # self.msgs_time_dict[str(msgs.id)] = curtime
+        # self.msgs_time_dict[str(msgs.id)] = recvtime
         user_mgr = self.user_mgrs.get(str(msgs.source), None)
         if user_mgr is None:
             user_mgr = userMgr(self, gptSessionManage(self.configs['openai']['save_history']))
@@ -356,7 +359,7 @@ class gptMessageManage(object):
             
 
         oldTime = user_mgr.get_latest_req_time()
-        user_mgr.set_latest_req_time(curtime)
+        user_mgr.set_latest_req_time(recvtime)
         # req_times = user_mgr.get_req_times() + 1
         # user_mgr.set_req_times(req_times)
 
@@ -377,6 +380,7 @@ class gptMessageManage(object):
                     t.start()
                 res = 'success'
         elif msg_content == '$new':
+            self.msgs_msg_cut_dict.clear()
             user_mgr.clear()
             logging.debug("$new1")
             return '对话历史已经清空'
@@ -384,23 +388,23 @@ class gptMessageManage(object):
             waiting_rsp_user_id = user_mgr.get_waiting_rsp_msg_id()
             # 收到新消息
             if waiting_rsp_user_id == 0:
+                self.msgs_msg_cut_dict.clear()
+                user_mgr.err_num = 0
                 res = user_mgr.get_responce_first(msgs)
             else:
                 if waiting_rsp_user_id != msgs.id:
-                    user_mgr.err_num += 1
-                    if user_mgr.err_num == 3:
-                        logging.debug("请等待上一句咨询回复完成后再发新的对话, num:{}".format(user_mgr.err_num))
-                    else:
+                    if user_mgr.err_num >= 3:
                         logging.debug("$clear")
                         user_mgr.clear()
                         return '对话历史已经清空'
+                    else:
+                        logging.debug("请等待上一句话咨询回复完成后再开始下一句咨询, num:{}".format(user_mgr.err_num))
+                        user_mgr.set_latest_req_time(oldTime)
+                        user_mgr.err_num += 1
+                        return '请等待上一句话咨询回复完成后再开始下一句咨询'
 
-                    user_mgr.set_latest_req_time(oldTime)
-                    user_mgr.err_num += 1
-                    return '请等待上一句话咨询回复完成后再开始下一句咨询'
-
-        logging.debug('1111记录时间：{}, 当前时间:{}, waiting_rsp_msg_id:{}, timeout_id:{}, recv_msg:{}'.format(
-            user_mgr.get_latest_req_time(), curtime, user_mgr.get_waiting_rsp_msg_id(),
+        logging.debug('1111记录最新时间：{}, 接收时间:{}, waiting_rsp_msg_id:{}, timeout_id:{}, recv_msg:{}'.format(
+            user_mgr.get_latest_req_time(), recvtime, user_mgr.get_waiting_rsp_msg_id(),
             user_mgr.get_timeout_waiting_rsp_msg_id(), user_mgr.get_recv_rsp_msg()))
         
         while user_mgr.get_recv_rsp_msg() == '' and \
@@ -417,16 +421,20 @@ class gptMessageManage(object):
         # logging.debug('收到结果', str(recvmsg))
         # lock.release()
 
-        logging.debug('2222记录时间：{}, 当前时间:{}, waiting_rsp_msg_id:{}, timeout_id:{}, recv_msg:{}'.format(
-            user_mgr.get_latest_req_time(), curtime, user_mgr.get_waiting_rsp_msg_id(),
+        ctime = int(time.time())
+        logging.debug('2222记录时间：{}, 接收时间:{}, 当前时间:{}, waiting_rsp_msg_id:{}, timeout_id:{}, recv_msg:{}'.format(
+            user_mgr.get_latest_req_time(), recvtime, ctime, user_mgr.get_waiting_rsp_msg_id(),
             user_mgr.get_timeout_waiting_rsp_msg_id(), user_mgr.get_recv_rsp_msg()))
 
         # 判断当前请求是否是最新的请求，是：返回消息，否：返回空
-        if curtime == user_mgr.get_latest_req_time():
+        if recvtime == user_mgr.get_latest_req_time(): #  and ctime - recvtime < 5
             if (user_mgr.get_timeout_waiting_rsp_msg_id() == user_mgr.get_waiting_rsp_msg_id()
                     and user_mgr.get_recv_rsp_msg() == ''):
                 logging.debug('人数过多，咨询超时，请回复【1】继续上一条咨询')
                 return '人数过多，咨询超时，请回复【1】继续上一条咨询'
+            # if ctime - recvtime > 5:
+            #     logging.debug('人数过多，咨询超时，请回复【1】继续上一条咨询')
+                
             recvmsg = user_mgr.get_recv_rsp_msg()
             user_mgr.set_recv_rsp_msg('')
             user_mgr.set_waiting_rsp_msg_id(0)
@@ -452,7 +460,7 @@ class gptMessageManage(object):
                 return self.msgs_msg_cut_dict[str(msgs.source)].pop(0) + '\n 还有剩余结果，请回复【1】查看！'
             return retunsMsg
         else:
-            logging.debug('该旧请求不需要回复:time:{}, 内容：{}'.format(curtime, msg_content))
+            logging.debug('该旧请求不需要回复:time:{}, 内容：{}'.format(recvtime, msg_content))
             # self.del_cache()
             time.sleep(4)
             return ''

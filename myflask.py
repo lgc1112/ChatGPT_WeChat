@@ -113,7 +113,7 @@ def wechat():
             # if cctime == msgsmanag.user_mgrs.get(str(msg.id),''):
             #     return reply.render()
         if msg.type == 'image':
-            rtext = '您发送了一张图片！'
+            rtext = '抱歉，暂不支持发送图片信息'
             reply = create_reply(rtext, message=msg)#创建消息
             return reply.render()#回复消息
         return ''
