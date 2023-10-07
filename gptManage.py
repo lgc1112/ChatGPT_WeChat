@@ -7,6 +7,7 @@ import logging
 import azure.cognitiveservices.speech as speechsdk
 from wechatpy import WeChatClient
 from wechatpy.replies import VoiceReply
+from wechatpy.replies import ImageReply
 
 import threading
 import os
@@ -172,25 +173,6 @@ class userMgr(object):
                 'temperature': self.msg_mgr.temperature,
             }
 
-
-            # answer = ''
-            # new_conversation_id = ''
-            # new_parent_id = ''
-            # logging.info(f'old_conversation_id={self.conversation_id}, new_parent_id={self.parent_id}')
-            # prompt = configs['openai']['system_prompt']
-            # logging.info(f'query={msgs.content} query={prompt}')
-            # if (self.conversation_id == ''):
-            #     for data in chatbot.ask(prompt, self.conversation_id, self.parent_id):
-            #         self.conversation_id = data['conversation_id']
-            #         self.parent_id = data['parent_id']
-                 
-            # for data in chatbot.ask(f"{msgs.content}", self.conversation_id, self.parent_id):
-            #     answer = data['message']
-            #     self.conversation_id = data['conversation_id']
-            #     self.parent_id = data['parent_id']
-            #     model = data['model']
-            # logging.info(f'query={msgs.content}, model = {model}, answer={answer}, new_conversation_id={self.conversation_id}, new_parent_id={self.parent_id}')
-            # return answer
             response = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=json_data,
                                      timeout=120)
             response_parse = json.loads(response.text)
@@ -198,13 +180,14 @@ class userMgr(object):
             atime = int(time.time())
             logging.debug('收到的时间差：%d s,%d,%d' % (atime - btime, btime, atime))
             if 'error' in response_parse:
+                self.req_times = 0
                 logging.debug('咨询人数过多，访问受限，请稍后再试！')
                 return '咨询人数过多，访问受限，请稍后再试！'
             else:
-                self.session_mgr.add_res_message(
-                    response_parse['choices'][0]['message']['content'])
-                
-                return response_parse['choices'][0]['message']['content']
+                res = response_parse['choices'][0]['message']['content']
+                self.session_mgr.add_res_message(res)
+                logging.debug("res:{}".format(res))
+                return res
         except Exception as e:
             logging.debug(e)
             logging.debug('请求超时，请稍后再试！')
@@ -291,8 +274,9 @@ class userMgr(object):
             
         if self.waiting_rsp_msg_id == msg.id:
             self.set_recv_rsp_msg(res)
+            logging.debug("set_recv_rsp_msg")
         else:
-            logging.debug('对话已经发生重入, waiting_rsp_msg_id:{}, msg.id:{}'.format(self.waiting_rsp_msg_id, msg.id))
+            logging.error('对话已经发生重入, waiting_rsp_msg_id:{}, msg.id:{}'.format(self.waiting_rsp_msg_id, msg.id))
         return 'success'
 
     def get_responce_not_first(self, msg):
@@ -326,12 +310,15 @@ class gptMessageManage(object):
         self.msgs_returns_dict = dict()  # 记录每个msgID的返回值
         self.msgs_msgdata_dict = dict()  # 记录每个发送者的会话管理器gptSessionManage
         self.user_mgrs = dict()  # 记录每个发送者的会话管理器gptSessionManage
-        self.msgs_msg_cut_dict = dict()  # 记录每个msgID超过回复长度限制的分割列表
+        # self.msgs_msg_cut_dict = dict()  # 记录每个msgID超过回复长度限制的分割列表
 
         self.user_msg_timeSpan_dict = dict()  # 记录每个发送消息者的时间消息时间间隔
         self.user_msg_timePoint_dict = dict()  # 记录每个发送消息者的上次时间点
 
         self.media_id_list = []  # 用于记录上传到微信素材的media_id
+        self.picture_media_id = '-gF-cMNr_LcYB4Vpfb19G7h3NBTn_VcKeW0yFU1gOOzQuEx0GEBCGUkmvpg4qexc' # 用于记录上传到微信的图片media_id
+        # self.upload_wechat_picture()
+        self.pay_msg_id = '' # 记录付款的msg id
 
         self.last_clean_time = time.time()
 
@@ -339,6 +326,7 @@ class gptMessageManage(object):
         '''
         获取每条msg，回复消息
         '''
+            
         logging.debug('get_request:' + str(msgs.id) + str(msg_content))
         # self.msgs_time_dict[str(msgs.id)] = recvtime
         user_mgr = self.user_mgrs.get(str(msgs.source), None)
@@ -356,31 +344,37 @@ class gptMessageManage(object):
             logging.debug('Transfer English:' + str(msgs.id) + str(msg_content))
             user_mgr.is_english_teacher_mode = True
             user_mgr.transfer_voice()
-            
-
+        
+        # 超过5条消息时直接返回付款码
+        if msg_content != '1' and user_mgr.get_waiting_rsp_msg_id() == 0 and user_mgr.get_req_times() >= 5:
+            user_mgr.set_req_times(0)
+            reply = ImageReply(message=msgs)
+            reply.media_id = self.picture_media_id
+            self.pay_msg_id = str(msgs.id)
+            logging.debug('回复请付款')
+            user_mgr.session_mgr.add_res_message('免费咨询不易，继续咨询请先付款，祝付款者都能感情顺利、幸福美满!')
+            # 转换成 XML
+            return [reply]
+        # 后续该消息的重试需要直接返回
+        if str(msgs.id) == self.pay_msg_id:
+            logging.debug('pay msg retry')
+            return ''
+        
         oldTime = user_mgr.get_latest_req_time()
         user_mgr.set_latest_req_time(recvtime)
-        # req_times = user_mgr.get_req_times() + 1
-        # user_mgr.set_req_times(req_times)
 
         # 判断是否返回分割列表里面的内容
         if msg_content == '1':
-            if len(self.msgs_msg_cut_dict.get(str(msgs.source), [])) > 0:
-                if len(self.msgs_msg_cut_dict[str(msgs.source)]) > 1:
-                    return self.msgs_msg_cut_dict[str(msgs.source)].pop(0) + '\n 还有剩余结果，请回复【1】查看！'
-                else:
-                    return self.msgs_msg_cut_dict[str(msgs.source)].pop(0)
-            else:
-                if user_mgr.get_waiting_rsp_msg_id() == 0 and user_mgr.get_recv_rsp_msg() == '':
-                    return '没有消息啦'
-                if user_mgr.get_recv_rsp_msg() == '' and \
-                user_mgr.get_timeout_waiting_rsp_msg_id() == user_mgr.get_waiting_rsp_msg_id():
-                    user_mgr.timeout_waiting_rsp_msg_id = 0
-                    t = threading.Thread(target=user_mgr.runable_task)
-                    t.start()
-                res = 'success'
+            if user_mgr.get_waiting_rsp_msg_id() == 0 and user_mgr.get_recv_rsp_msg() == '':
+                return '没有消息啦'
+            # 没有接受到回包并且等待中的消息发生超时时，则重新计时
+            if user_mgr.get_recv_rsp_msg() == '' and \
+            user_mgr.get_timeout_waiting_rsp_msg_id() == user_mgr.get_waiting_rsp_msg_id():
+                user_mgr.timeout_waiting_rsp_msg_id = 0
+                t = threading.Thread(target=user_mgr.runable_task)
+                t.start()
+            res = 'success'
         elif msg_content == '$new':
-            self.msgs_msg_cut_dict.clear()
             user_mgr.clear()
             logging.debug("$new1")
             return '对话历史已经清空'
@@ -388,8 +382,8 @@ class gptMessageManage(object):
             waiting_rsp_user_id = user_mgr.get_waiting_rsp_msg_id()
             # 收到新消息
             if waiting_rsp_user_id == 0:
-                self.msgs_msg_cut_dict.clear()
                 user_mgr.err_num = 0
+                user_mgr.set_req_times(user_mgr.get_req_times() + 1)
                 res = user_mgr.get_responce_first(msgs)
             else:
                 if waiting_rsp_user_id != msgs.id:
@@ -403,23 +397,17 @@ class gptMessageManage(object):
                         user_mgr.err_num += 1
                         return '请等待上一句话咨询回复完成后再开始下一句咨询'
 
-        logging.debug('1111记录最新时间：{}, 接收时间:{}, waiting_rsp_msg_id:{}, timeout_id:{}, recv_msg:{}'.format(
+        logging.debug('1111记录最新时间：{}, 接收时间:{}, waiting_rsp_msg_id:{}, timeout_id:{}, recv_msg:{}, req_times:{}'.format(
             user_mgr.get_latest_req_time(), recvtime, user_mgr.get_waiting_rsp_msg_id(),
-            user_mgr.get_timeout_waiting_rsp_msg_id(), user_mgr.get_recv_rsp_msg()))
+            user_mgr.get_timeout_waiting_rsp_msg_id(), user_mgr.get_recv_rsp_msg(), user_mgr.get_req_times()))
         
         while user_mgr.get_recv_rsp_msg() == '' and \
                 user_mgr.get_timeout_waiting_rsp_msg_id() != user_mgr.get_waiting_rsp_msg_id():
             time.sleep(0.1)
 
         if (user_mgr.get_timeout_waiting_rsp_msg_id() == user_mgr.get_waiting_rsp_msg_id()
-                and user_mgr.get_recv_rsp_msg() != ''):
-                logging.debug('读取消息超时')
-
-        # lock.acquire()
-        # recvmsg = user_mgr.get_recv_rsp_msg()
-        # user_mgr.set_recv_rsp_msg('')
-        # logging.debug('收到结果', str(recvmsg))
-        # lock.release()
+            and user_mgr.get_recv_rsp_msg() != ''):
+            logging.debug('读取消息超时')
 
         ctime = int(time.time())
         logging.debug('2222记录时间：{}, 接收时间:{}, 当前时间:{}, waiting_rsp_msg_id:{}, timeout_id:{}, recv_msg:{}'.format(
@@ -447,21 +435,9 @@ class gptMessageManage(object):
             if isinstance(retunsMsg, list):
                 logging.debug('返回语音的列表：' + str(recvmsg))
                 return retunsMsg
-            # 判断长度是否过长，否则将消息分割
-            if len(retunsMsg) > self.rsize:
-                ssss = math.ceil(len(retunsMsg) / self.rsize)
-                cutmsgs = []
-                for i in range(ssss):
-                    if i == ssss - 1:
-                        cutmsgs.append(retunsMsg[i * self.rsize:])
-                    else:
-                        cutmsgs.append(retunsMsg[i * self.rsize:i * self.rsize + self.rsize])
-                self.msgs_msg_cut_dict[str(msgs.source)] = cutmsgs
-                return self.msgs_msg_cut_dict[str(msgs.source)].pop(0) + '\n 还有剩余结果，请回复【1】查看！'
             return retunsMsg
         else:
             logging.debug('该旧请求不需要回复:time:{}, 内容：{}'.format(recvtime, msg_content))
-            # self.del_cache()
             time.sleep(4)
             return ''
 
@@ -618,6 +594,19 @@ class gptMessageManage(object):
             print(e)
             return
 
+    def upload_wechat_picture(self):
+        '''上传语音素材到微信'''
+        try:
+            with open(f"pic/img.png", "rb") as f:
+                res = self.client.material.add('image', f)
+                media_id = str(res['media_id'])
+            logging.debug('inner get picture media_id:{}'.format(media_id))
+            self.picture_media_id = media_id
+            return media_id
+        except Exception as e:
+            print(e)
+            return
+        
     def have_chinese(self, strs):
         '''判断是否有中文'''
         for _char in strs[:8]:

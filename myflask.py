@@ -91,27 +91,15 @@ def wechat():
                 rtext = msgsmanag.get_response(msg, cctime, msg.recognition)
             except Exception as e:
                 raise
-                logging.debug("收到音频Exception" + str(e))
-                rtext = '您发送了一条语音消息！'
+            
             print('打印返回的内容',rtext)
             if isinstance(rtext, list):
                 print('返回的是语音：',rtext)
-                # reply = VoiceReply(message=msg)
                 reply = rtext[0]
             else:
                 reply = create_reply(rtext, message=msg)
-            # 等候1.2s的原因是，素材上传至微信后台需要时间审核, 否则回复的语音会存在问题
-            # time.sleep(1.2)
-            # 需要判断一下等候1.2S之后，是否有微信的二次请求
-            # user_mgr = msgsmanag.user_mgrs.get(str(msg.source), None)
-            # if user_mgr != None:
-            #     if cctime == user_mgr.get_latest_req_time():
             return reply.render()
-            logging.debug('user_mgr:%s, cctime:%s, latest_req_time:%s' %
-                          (str(user_mgr), str(cctime), str(user_mgr.get_latest_req_time()) if user_mgr != None else 'NONE'))
-                    
-            # if cctime == msgsmanag.user_mgrs.get(str(msg.id),''):
-            #     return reply.render()
+        
         if msg.type == 'image':
             rtext = '抱歉，暂不支持发送图片信息'
             reply = create_reply(rtext, message=msg)#创建消息
