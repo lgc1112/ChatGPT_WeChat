@@ -98,6 +98,8 @@ class userMgr(object):
         self.parent_id = ''
         self.is_english_teacher_mode = False
         self.err_num = 0
+        self.pay_times = 0 # 记录付款的次数
+        self.pay_msg_id = '' # 记录付款的msg id
         
     def clear(self):
         self.waiting_rsp_msg_id = 0
@@ -110,6 +112,7 @@ class userMgr(object):
         self.conversation_id = ''
         self.parent_id = ''
         self.err_num = 0
+        self.pay_msg_id = '' # 记录付款的msg id
 
     def transfer_voice(self):
         self.waiting_rsp_msg_id = 0
@@ -122,6 +125,7 @@ class userMgr(object):
         self.conversation_id = ''
         self.parent_id = ''
         self.err_num = 0
+        self.pay_msg_id = '' # 记录付款的msg id
     
     def set_waiting_rsp_msg_id(self, msg_id):
         self.waiting_rsp_msg_id = msg_id
@@ -318,7 +322,6 @@ class gptMessageManage(object):
         self.media_id_list = []  # 用于记录上传到微信素材的media_id
         self.picture_media_id = '-gF-cMNr_LcYB4Vpfb19G7h3NBTn_VcKeW0yFU1gOOzQuEx0GEBCGUkmvpg4qexc' # 用于记录上传到微信的图片media_id
         # self.upload_wechat_picture()
-        self.pay_msg_id = '' # 记录付款的msg id
 
         self.last_clean_time = time.time()
 
@@ -346,17 +349,18 @@ class gptMessageManage(object):
             user_mgr.transfer_voice()
         
         # 超过5条消息时直接返回付款码
-        if msg_content != '1' and user_mgr.get_waiting_rsp_msg_id() == 0 and user_mgr.get_req_times() >= 5:
+        if msg_content != '1' and user_mgr.get_waiting_rsp_msg_id() == 0 and user_mgr.get_req_times() >= 5 * (user_mgr.pay_times + 1):
             user_mgr.set_req_times(0)
+            user_mgr.pay_times = user_mgr.pay_times + 1
             reply = ImageReply(message=msgs)
             reply.media_id = self.picture_media_id
-            self.pay_msg_id = str(msgs.id)
+            user_mgr.pay_msg_id = str(msgs.id)
             logging.debug('回复请付款')
             user_mgr.session_mgr.add_res_message('免费咨询不易，继续咨询请先付款，祝付款者都能感情顺利、幸福美满!')
             # 转换成 XML
             return [reply]
         # 后续该消息的重试需要直接返回
-        if str(msgs.id) == self.pay_msg_id:
+        if str(msgs.id) == user_mgr.pay_msg_id:
             logging.debug('pay msg retry')
             return ''
         
@@ -392,10 +396,10 @@ class gptMessageManage(object):
                         user_mgr.clear()
                         return '对话历史已经清空'
                     else:
-                        logging.debug("请等待上一句话咨询回复完成后再开始下一句咨询, num:{}".format(user_mgr.err_num))
+                        logging.debug("正在等待回复中，请等待上一句话咨询回复完成后再开始下一句咨询, num:{}".format(user_mgr.err_num))
                         user_mgr.set_latest_req_time(oldTime)
                         user_mgr.err_num += 1
-                        return '请等待上一句话咨询回复完成后再开始下一句咨询'
+                        return '正在等待回复中，请等待上一句话咨询回复完成后再开始下一句咨询'
 
         logging.debug('1111记录最新时间：{}, 接收时间:{}, waiting_rsp_msg_id:{}, timeout_id:{}, recv_msg:{}, req_times:{}'.format(
             user_mgr.get_latest_req_time(), recvtime, user_mgr.get_waiting_rsp_msg_id(),
